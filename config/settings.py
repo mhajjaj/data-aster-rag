@@ -1,8 +1,13 @@
-"""Centralized configuration for the RAG pipeline."""
+"""Configuration loader with validation for the RAG pipeline."""
 
+import logging
 from pathlib import Path
+from typing import Optional
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
+from pydantic import Field, field_validator
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -15,7 +20,7 @@ class Settings(BaseSettings):
     )
 
     # Paths
-    project_root: Path = Field(default=Path(__file__).resolve().parent.parent.parent)
+    project_root: Path = Field(default_factory=lambda: Path(__file__).resolve().parent.parent.parent)
     data_raw_dir: Path = Field(default=Path("data/raw"))
     data_processed_dir: Path = Field(default=Path("data/processed"))
 
@@ -31,6 +36,9 @@ class Settings(BaseSettings):
     vector_store_collection: str = Field(default="data_aster_docs")
     vector_dimension: int = Field(default=3072)
 
+    # Qdrant Cloud
+    qdrant_api_key: Optional[str] = Field(default=None)
+
     # Chunking
     chunk_size: int = Field(default=1000)
     chunk_overlap: int = Field(default=200)
@@ -40,12 +48,31 @@ class Settings(BaseSettings):
     rerank_top_k: int = Field(default=5)
 
     # OCR / Vision
-    ocr_engine: str = Field(default="paddle")  # paddle, easyocr, tesseract
-    vision_model: str = Field(default="gpt-4o")  # for image description
+    ocr_engine: str = Field(default="paddle")
+    vision_model: str = Field(default="gpt-4o")
 
-    def __post_init__(self):
-        self.data_raw_dir = (self.project_root / self.data_raw_dir).resolve()
-        self.data_processed_dir = (self.project_root / self.data_processed_dir).resolve()
+    # Evaluation
+    judge_model: str = Field(default="gpt-4o")
+    evaluation_timeout_seconds: int = Field(default=10800)  # 3 hours
+
+    @field_validator("openai_api_key", mode="after")
+    @classmethod
+    def check_api_key(cls, v: str) -> str:
+        if not v or v.startswith("sk-") is False:
+            logger.warning("OPENAI_API_KEY is missing or looks invalid.")
+        return v
+
+    @field_validator("data_raw_dir", "data_processed_dir", mode="after")
+    @classmethod
+    def resolve_paths(cls, v: Path, info) -> Path:
+        root = info.data.get("project_root") or Path(".").resolve()
+        if not v.is_absolute():
+            return (root / v).resolve()
+        return v.resolve()
+
+    def ensure_directories(self):
+        self.data_raw_dir.mkdir(parents=True, exist_ok=True)
+        self.data_processed_dir.mkdir(parents=True, exist_ok=True)
 
 
 settings = Settings()
