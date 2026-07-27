@@ -19,6 +19,8 @@ from src.indexing.processor import DocumentProcessor
 from src.indexing.embeddings import EmbeddingClient
 from src.indexing.qdrant_store import QdrantVectorStore
 from src.agent.orchestrator import AgenticRAG
+from src.evaluation.evaluator import CompetitionEvaluator
+from src.utils.submission import json_to_submission, validate_submission
 
 logging.basicConfig(
     level=logging.INFO,
@@ -103,6 +105,63 @@ def answer_questions(questions_path: Path, output_path: Path):
     logger.info(f"Wrote {len(results)} answers to {output_path}")
 
 
+def submit(answers_json: Path, output_csv: Path):
+    """Convert JSON answers to submission CSV and validate."""
+    logger.info("=" * 60)
+    logger.info("Formatting submission...")
+
+    with open(answers_json, "r", encoding="utf-8") as f:
+        results = json.load(f)
+
+    # Map to submission format
+    submission = [
+        {"question_id": r.get("question_id", ""), "answer": r.get("answer", "")}
+        for r in results
+    ]
+
+    json_to_submission(submission, output_csv)
+    is_valid = validate_submission(output_csv)
+    if not is_valid:
+        logger.error("Submission validation failed!")
+        sys.exit(1)
+    logger.info(f"Submission written to {output_csv}")
+
+
+def evaluate(
+    submission_csv: Path,
+    ground_truth_csv: Path = None,
+    questions_csv: Path = None,
+    output_json: Path = None,
+    use_judge: bool = False,
+):
+    """Run evaluation harness on a generated submission."""
+    logger.info("=" * 60)
+    logger.info("Running evaluation...")
+
+    evaluator = CompetitionEvaluator(use_judge=use_judge)
+    report = evaluator.evaluate(
+        submission_csv=submission_csv,
+        ground_truth_csv=ground_truth_csv,
+        questions_csv=questions_csv,
+        output_json=output_json,
+    )
+
+    # Print summary
+    print("\n=== Evaluation Summary ===")
+    print(f"Total questions: {report['total_questions']}")
+    fc = report['format_check']
+    print(f"Format passed: {fc['passed']}/{report['total_questions']}")
+    if 'ground_truth' in report:
+        gt = report['ground_truth']
+        print(f"Exact match: {gt['exact_match']} ({gt['exact_match_rate']*100:.1f}%)")
+    if 'judge' in report:
+        print(f"Judge avg score: {report['judge']['average_score']}")
+    print("=========================\n")
+
+    if output_json:
+        logger.info(f"Detailed report: {output_json}")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Data Aster RAG System")
     subparsers = parser.add_subparsers(dest="command")
@@ -117,6 +176,19 @@ if __name__ == "__main__":
     answer_parser.add_argument("--questions", type=Path, required=True)
     answer_parser.add_argument("--output", type=Path, default=Path("output/answers.json"))
 
+    # submit
+    submit_parser = subparsers.add_parser("submit", help="Convert JSON answers to submission CSV")
+    submit_parser.add_argument("--answers-json", type=Path, required=True)
+    submit_parser.add_argument("--output", type=Path, default=Path("output/submission.csv"))
+
+    # evaluate
+    eval_parser = subparsers.add_parser("evaluate", help="Evaluate a submission")
+    eval_parser.add_argument("--submission", type=Path, required=True)
+    eval_parser.add_argument("--ground-truth", type=Path, default=None)
+    eval_parser.add_argument("--questions", type=Path, default=None)
+    eval_parser.add_argument("--output", type=Path, default=Path("output/evaluation.json"))
+    eval_parser.add_argument("--use-judge", action="store_true")
+
     args = parser.parse_args()
 
     if args.command == "build-index":
@@ -125,6 +197,16 @@ if __name__ == "__main__":
         output_dir = args.output.parent
         output_dir.mkdir(parents=True, exist_ok=True)
         answer_questions(args.questions, args.output)
+    elif args.command == "submit":
+        submit(args.answers_json, args.output)
+    elif args.command == "evaluate":
+        evaluate(
+            submission_csv=args.submission,
+            ground_truth_csv=args.ground_truth,
+            questions_csv=args.questions,
+            output_json=args.output,
+            use_judge=args.use_judge,
+        )
     else:
         parser.print_help()
         sys.exit(1)
